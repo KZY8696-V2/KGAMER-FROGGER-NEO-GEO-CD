@@ -24,7 +24,8 @@ jobs:
             wget \
             genisoimage \
             binutils-m68k-linux-gnu \
-            gcc-m68k-linux-gnu
+            gcc-m68k-linux-gnu \
+            libc6-dev-m68k-cross
 
       - name: Setup Neodev SDK
         run: |
