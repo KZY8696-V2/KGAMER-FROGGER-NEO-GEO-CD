@@ -6,7 +6,8 @@ OBJCOPY = m68k-linux-gnu-objcopy
 INCS = -I. -I/usr/include/neodev
 LIBS = -L/usr/lib -lneodev
 
-CFLAGS = -O2 -m68k -Wall -fomit-frame-pointer $(INCS)
+# DÜZELTME: -m68k yerine geçerli olan -m68000 mimari bayrağı eklendi
+CFLAGS = -O2 -m68000 -Wall -fomit-frame-pointer $(INCS)
 LDFLAGS = -T neogeo.ld $(LIBS) -nostdlib
 
 all: frogger.elf
