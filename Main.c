@@ -1,19 +1,11 @@
 /* ========================================================================== *
- * KGAMER FROGGER NEO GEO CD / CDZ - FULL IN-GAME HUD & ACTIVE HARDWARE CORE   *
- * Live In-Game HUD: FPS, HW Model (CD/CDZ), Current Biome & Score Tracker     *
+ * KGAMER FROGGER NEO GEO CD / CDZ - NEODEV INTEGRATED KERNEL                *
+ * Features: neodev.h SDK, Live FPS, HW Model (CD/CDZ), Biomes & HUD          *
  * ========================================================================== */
 
 #include <stdint.h>
 #include <string.h>
-#include "neogeo.h"
-
-// Donanımsal VDP Register Adresleri
-#define REG_VRAM_ADDR       (*(volatile uint16_t*)0x3C0000)
-#define REG_VRAM_DATA       (*(volatile uint16_t*)0x3C0002)
-#define REG_VRAM_MOD        (*(volatile uint16_t*)0x3C0004)
-#define REG_VBLANK_STATUS   (*(volatile uint16_t*)0x3C0006)
-#define REG_JOYPAD1         (*(volatile uint8_t*)0x3C000B)
-#define REG_SYSTEM_CTRL     (*(volatile uint16_t*)0xFF0000)
+#include <neodev.h> // Neo Geo CD Geliştirme Kiti Standart Başlığı
 
 #define SCREEN_WIDTH        320
 #define SCREEN_HEIGHT       224
@@ -50,7 +42,7 @@ typedef struct {
     int32_t width, height;
     int32_t velocity;
     uint8_t active;
-    uint8_t variant;
+    uint8_t variant; // 0: Araba, 1: Buz, 2: Timsah, 3: Deve
     
     int32_t mouth_start;
     int32_t mouth_end;
@@ -100,44 +92,41 @@ typedef struct {
 
 static GameContext ctx;
 
-// --- DİNAMİK CİHAZ TESPİTİ ---
+// --- NEODEV TABANLI DONANIM TESPİTİ (CD vs CDZ) ---
 static HardwareModel DetectHardwareVersion(void) {
-    uint16_t hw_status = REG_SYSTEM_CTRL;
-    if ((hw_status & 0x0002) != 0 || (*(volatile uint8_t*)0xFF0002 == 'Z')) {
+    volatile uint16_t *sys_ctrl = (volatile uint16_t*)0xFF0000;
+    if ((*sys_ctrl & 0x0002) != 0 || (*(volatile uint8_t*)0xFF0002 == 'Z')) {
         return HARDWARE_MODEL_CDZ;
     }
     return HARDWARE_MODEL_CD;
 }
 
-// --- VDP VRAM RENDER İŞLEMLERİ ---
-static void VDP_SetAddress(uint32_t addr, uint16_t mode_inc) {
-    REG_VRAM_MOD = mode_inc;
-    REG_VRAM_ADDR = (uint16_t)(addr & 0xFFFF);
-}
+// --- FIX KATMANI METİN YAZMA (neodev VRAM / Fix Stream) ---
+static void NeoDev_DrawText(int col, int row, const char *str) {
+    // neodev kütüphane standartlarına uygun fix layer yazma offseti
+    volatile uint16_t *vram_addr = (volatile uint16_t*)0x3C0000;
+    volatile uint16_t *vram_data = (volatile uint16_t*)0x3C0002;
+    volatile uint16_t *vram_mod  = (volatile uint16_t*)0x3C0004;
 
-static void VDP_WriteWord(uint16_t data) {
-    REG_VRAM_DATA = data;
-}
-
-static void VDP_DrawTextToFixLayer(int col, int row, const char *str) {
-    uint32_t vram_offset = 0x7000 + (row * 32 + col);
-    VDP_SetAddress(vram_offset, 1);
+    uint32_t offset = 0x7000 + (row * 32 + col);
+    *vram_mod = 1;
+    *vram_addr = (uint16_t)(offset & 0xFFFF);
+    
     while (*str) {
-        VDP_WriteWord((uint16_t)(*str));
+        *vram_data = (uint16_t)(*str);
         str++;
     }
 }
 
-static void VDP_ClearScreenData(void) {
-    VDP_SetAddress(0x7000, 1);
-    for (int i = 0; i < 32 * 32; i++) {
-        VDP_WriteWord(0x0020);
-    }
-}
+static void NeoDev_ClearScreen(void) {
+    volatile uint16_t *vram_addr = (volatile uint16_t*)0x3C0000;
+    volatile uint16_t *vram_data = (volatile uint16_t*)0x3C0002;
+    volatile uint16_t *vram_mod  = (volatile uint16_t*)0x3C0004;
 
-static void CD_WaitVBlank(void) {
-    while ((REG_VBLANK_STATUS & 0x0100) == 0) {
-        // VDP Tarama Beklemesi
+    *vram_mod = 1;
+    *vram_addr = 0x7000;
+    for (int i = 0; i < 32 * 32; i++) {
+        *vram_data = 0x0020;
     }
 }
 
@@ -146,7 +135,7 @@ static uint32_t CD_Random(void) {
     return ctx.seed;
 }
 
-// Katı Biyom Geçiş Matrisi
+// Katı Biyom Geçiş Kuralı Matrisi
 static BiomeType GetStrictNextBiome(BiomeType current) {
     if (current == BIOME_TAIGA || current == BIOME_RED_DESERT) {
         return BIOME_PLAINS;
@@ -263,12 +252,12 @@ static void UpdateLanes(void) {
     }
 }
 
-// --- OYUN İÇİ VE MENÜ KÖŞE HUD & VDP RENDERER ---
-static void VDP_RenderFrameToHardware(void) {
-    VDP_ClearScreenData();
+// --- OYUN İÇİ & MENÜ HUD VE VDP RENDERER ---
+static void RenderFrame(void) {
+    NeoDev_ClearScreen();
 
-    // 1. OYUN İÇİNDE VE TÜM EKRANLARDA SABİT KÖŞE BİLGİ ALANI (HUD: FPS & Donanım)
-    VDP_DrawTextToFixLayer(1, 1, ctx.active_hardware == HARDWARE_MODEL_CDZ ? "HW: CDZ [2X]" : "HW: CD [1X]");
+    // 1. KÖŞE HUD: Donanım Modu ve Canlı FPS
+    NeoDev_DrawText(1, 1, ctx.active_hardware == HARDWARE_MODEL_CDZ ? "HW: CDZ [2X]" : "HW: CD [1X]");
     
     char fps_buf[8];
     int f_val = (int)ctx.current_fps;
@@ -276,47 +265,47 @@ static void VDP_RenderFrameToHardware(void) {
     fps_buf[4] = '0' + (f_val / 10);
     fps_buf[5] = '0' + (f_val % 10);
     fps_buf[6] = '\0';
-    VDP_DrawTextToFixLayer(24, 1, fps_buf);
+    NeoDev_DrawText(24, 1, fps_buf);
 
-    // Aktif Biyom Bilgisi Ekranın Üst Köşesinde Sürekli Görünür
+    // Aktif Biyom Göstergesi
     int absolute_lane = (ctx.player.y + ctx.camera_y) / LANE_HEIGHT;
     if (absolute_lane >= 0 && absolute_lane < TOTAL_LANES) {
         ctx.current_biome = ctx.lanes[absolute_lane].biome;
     }
 
     if (ctx.current_biome == BIOME_TAIGA) {
-        VDP_DrawTextToFixLayer(1, 2, "BIOME: KARLI TAIGA");
+        NeoDev_DrawText(1, 2, "BIOME: KARLI TAIGA");
     } else if (ctx.current_biome == BIOME_RED_DESERT) {
-        VDP_DrawTextToFixLayer(1, 2, "BIOME: KIZIL COL");
+        NeoDev_DrawText(1, 2, "BIOME: KIZIL COL");
     } else {
-        VDP_DrawTextToFixLayer(1, 2, "BIOME: OVA TAMPON");
+        NeoDev_DrawText(1, 2, "BIOME: OVA TAMPON");
     }
 
-    // 2. DURUM MAKİNESİNE GÖRE EKRAN ÇİZİMLERİ
+    // 2. STATE MACHINE EKRANLARI
     if (ctx.state == STATE_MAIN_MENU) {
         if (ctx.current_biome == BIOME_TAIGA) {
-            VDP_DrawTextToFixLayer(6, 6, "FROGGER: KARLI TAIGA");
+            NeoDev_DrawText(6, 6, "FROGGER: KARLI TAIGA");
         } else if (ctx.current_biome == BIOME_RED_DESERT) {
-            VDP_DrawTextToFixLayer(6, 6, "FROGGER: KIZIL COL");
+            NeoDev_DrawText(6, 6, "FROGGER: KIZIL COL");
         } else {
-            VDP_DrawTextToFixLayer(6, 6, "FROGGER: OVA MODU");
+            NeoDev_DrawText(6, 6, "FROGGER: OVA MODU");
         }
 
-        VDP_DrawTextToFixLayer(9, 11, ctx.menu_sel == 0 ? "> OYUNA BASLA" : "  OYUNA BASLA");
-        VDP_DrawTextToFixLayer(9, 13, ctx.menu_sel == 1 ? "> CIKIS" : "  CIKIS");
+        NeoDev_DrawText(9, 11, ctx.menu_sel == 0 ? "> OYUNA BASLA" : "  OYUNA BASLA");
+        NeoDev_DrawText(9, 13, ctx.menu_sel == 1 ? "> CIKIS" : "  CIKIS");
     } 
     else if (ctx.state == STATE_PAUSE_MENU) {
-        VDP_DrawTextToFixLayer(10, 8,  "--- DURAKLATILDI ---");
-        VDP_DrawTextToFixLayer(9, 11, ctx.pause_sel == 0 ? "> OYUNA DEVAM ET" : "  OYUNA DEVAM ET");
-        VDP_DrawTextToFixLayer(9, 13, ctx.pause_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
+        NeoDev_DrawText(10, 8,  "--- DURAKLATILDI ---");
+        NeoDev_DrawText(9, 11, ctx.pause_sel == 0 ? "> OYUNA DEVAM ET" : "  OYUNA DEVAM ET");
+        NeoDev_DrawText(9, 13, ctx.pause_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
     } 
     else if (ctx.state == STATE_GAME_OVER) {
-        VDP_DrawTextToFixLayer(11, 8,  "GAME OVER");
-        VDP_DrawTextToFixLayer(9, 11, ctx.gameover_sel == 0 ? "> YENIDEN BASLA" : "  YENIDEN BASLA");
-        VDP_DrawTextToFixLayer(9, 13, ctx.gameover_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
+        NeoDev_DrawText(11, 8,  "GAME OVER");
+        NeoDev_DrawText(9, 11, ctx.gameover_sel == 0 ? "> YENIDEN BASLA" : "  YENIDEN BASLA");
+        NeoDev_DrawText(9, 13, ctx.gameover_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
     }
     else if (ctx.state == STATE_GAMEPLAY) {
-        // Oyun İçerisinde Can ve Skor HUD Bilgisi
+        // Skor HUD
         char score_buf[16];
         int s_val = (int)ctx.player.score;
         score_buf[0] = 'S'; score_buf[1] = ':';
@@ -325,16 +314,21 @@ static void VDP_RenderFrameToHardware(void) {
         score_buf[4] = '0' + ((s_val / 10) % 10);
         score_buf[5] = '0' + (s_val % 10);
         score_buf[6] = '\0';
-        VDP_DrawTextToFixLayer(1, 26, score_buf);
+        NeoDev_DrawText(1, 26, score_buf);
 
-        // VDP Sprite Tablosuna Aktarım
-        VDP_SetAddress(0x8000, 1);
+        // Sprite Tablosu (SAT) Güncellemesi
+        volatile uint16_t *vram_addr = (volatile uint16_t*)0x3C0000;
+        volatile uint16_t *vram_data = (volatile uint16_t*)0x3C0002;
+        volatile uint16_t *vram_mod  = (volatile uint16_t*)0x3C0004;
+
+        *vram_mod = 1;
+        *vram_addr = 0x8000;
 
         int32_t frog_screen_y = ctx.player.y - ctx.camera_y;
-        VDP_WriteWord((uint16_t)((512 - (frog_screen_y & 0x1FF)) << 7));
-        VDP_WriteWord(0x0002);
-        VDP_WriteWord(0x1000);
-        VDP_WriteWord((uint16_t)(ctx.player.x & 0x1FF));
+        *vram_data = (uint16_t)((512 - (frog_screen_y & 0x1FF)) << 7);
+        *vram_data = 0x0002;
+        *vram_data = 0x1000;
+        *vram_data = (uint16_t)(ctx.player.x & 0x1FF);
 
         for (int i = 0; i < TOTAL_LANES; i++) {
             LaneData *l = &ctx.lanes[i];
@@ -343,10 +337,10 @@ static void VDP_RenderFrameToHardware(void) {
                 if (o->active) {
                     int32_t obj_screen_y = o->y - ctx.camera_y;
                     if (obj_screen_y >= -32 && obj_screen_y <= SCREEN_HEIGHT + 32) {
-                        VDP_WriteWord((uint16_t)((512 - (obj_screen_y & 0x1FF)) << 7));
-                        VDP_WriteWord(0x0002);
-                        VDP_WriteWord(o->variant == 2 ? 0x1200 : 0x1100);
-                        VDP_WriteWord((uint16_t)(o->x & 0x1FF));
+                        *vram_data = (uint16_t)((512 - (obj_screen_y & 0x1FF)) << 7);
+                        *vram_data = 0x0002;
+                        *vram_data = o->variant == 2 ? 0x1200 : 0x1100;
+                        *vram_data = (uint16_t)(o->x & 0x1FF);
                     }
                 }
             }
@@ -409,7 +403,6 @@ static void CheckCollisions(void) {
             ctx.player.x += p_vel;
             if (ctx.player.x < 0 || ctx.player.x > SCREEN_WIDTH) {
                 ctx.player.alive = 0;
-                ctx.gameover_sel = 0;
                 ctx.state = STATE_GAME_OVER;
             }
         }
@@ -417,7 +410,7 @@ static void CheckCollisions(void) {
 }
 
 static void HandleControllerInput(void) {
-    uint8_t pad = REG_JOYPAD1;
+    uint8_t pad = joypad_read(0); // neodev standart joypad okuma rutini
     uint8_t pressed = (ctx.last_pad ^ pad) & ~pad;
 
     if (ctx.state == STATE_MAIN_MENU) {
@@ -469,8 +462,9 @@ static void HandleControllerInput(void) {
 }
 
 int main(void) {
+    neodev_init(); // neodev başlangıç rutinleri
+
     memset(&ctx, 0, sizeof(GameContext));
-    
     ctx.active_hardware = DetectHardwareVersion();
     ctx.state = STATE_MAIN_MENU;
     ctx.seed = 0x47414D45;
@@ -478,10 +472,9 @@ int main(void) {
     ctx.current_biome = BIOME_PLAINS;
 
     while (1) {
-        CD_WaitVBlank();
+        wait_vblank(); // neodev standart vblank senkronizasyonu
         ctx.ticks++;
 
-        // Canlı FPS Sayaç Güncellemesi (Her 60 VBlank karesinde bir hesaplanır)
         ctx.fps_counter++;
         ctx.second_timer++;
         if (ctx.second_timer >= 60) {
@@ -497,8 +490,7 @@ int main(void) {
             CheckCollisions();
         }
 
-        // Oyun içinde ve menülerde anlık HUD ve VDP güncellemesi
-        VDP_RenderFrameToHardware();
+        RenderFrame();
     }
     return 0;
 }
