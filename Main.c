@@ -1,340 +1,504 @@
 /* ========================================================================== *
- * KGAMER FROGGER NEO GEO CD - FULL HARDWARE-LEVEL RUNTIME CORE               *
- * Architecture: Motorola 68000 / Neo Geo CD (VDP RAM, Joypad & Timers)       *
- * NO STUBS, NO PLACEHOLDERS - 100% COMPLETE IMPLEMENTATION                   *
+ * KGAMER FROGGER NEO GEO CD / CDZ - FULL IN-GAME HUD & ACTIVE HARDWARE CORE   *
+ * Live In-Game HUD: FPS, HW Model (CD/CDZ), Current Biome & Score Tracker     *
  * ========================================================================== */
 
 #include <stdint.h>
 #include <string.h>
+#include "neogeo.h"
 
-#define HW_REG_VRAM_ADDR       (*(volatile uint16_t*)0x3C0000)
-#define HW_REG_VRAM_DATA       (*(volatile uint16_t*)0x3C0002)
-#define HW_REG_VRAM_MOD        (*(volatile uint16_t*)0x3C0004)
-#define HW_REG_VBLANK_STATUS   (*(volatile uint16_t*)0x3C0006)
-#define HW_REG_JOYPAD1         (*(volatile uint8_t*)0x3C000B)
-#define HW_REG_JOYPAD2         (*(volatile uint8_t*)0x3C000D)
+// Donanımsal VDP Register Adresleri
+#define REG_VRAM_ADDR       (*(volatile uint16_t*)0x3C0000)
+#define REG_VRAM_DATA       (*(volatile uint16_t*)0x3C0002)
+#define REG_VRAM_MOD        (*(volatile uint16_t*)0x3C0004)
+#define REG_VBLANK_STATUS   (*(volatile uint16_t*)0x3C0006)
+#define REG_JOYPAD1         (*(volatile uint8_t*)0x3C000B)
+#define REG_SYSTEM_CTRL     (*(volatile uint16_t*)0xFF0000)
 
-#define SCREEN_RES_X           320
-#define SCREEN_RES_Y           224
-#define TOTAL_MAP_LANES        48
-#define LANE_PIXEL_HEIGHT      16
-#define MAX_OBJS_PER_LANE      8
-
-typedef enum {
-    BIOME_KIND_TAIGA = 0,
-    BIOME_KIND_RED_DESERT,
-    BIOME_KIND_PLAINS
-} BiomeKind;
+#define SCREEN_WIDTH        320
+#define SCREEN_HEIGHT       224
+#define LANE_HEIGHT         16
+#define TOTAL_LANES         48
+#define MAX_OBJECTS         8
 
 typedef enum {
-    LANE_KIND_SAFE_GROUND = 0,
-    LANE_KIND_HIGHWAY_TRAFFIC,
-    LANE_KIND_RIVER_ICE_OR_CROCODILE
-} LaneKind;
+    HARDWARE_MODEL_CD = 1,
+    HARDWARE_MODEL_CDZ
+} HardwareModel;
+
+typedef enum {
+    STATE_MAIN_MENU = 0,
+    STATE_GAMEPLAY,
+    STATE_PAUSE_MENU,
+    STATE_GAME_OVER
+} GameModeState;
+
+typedef enum {
+    BIOME_TAIGA = 0,      // Karlı Taiga (Soğuk: Buz & Timsah)
+    BIOME_RED_DESERT,     // Kızıl Çöl (Sıcak: Develer & Kervanlar)
+    BIOME_PLAINS          // Ovalar (Tampon Güvenli Bölge)
+} BiomeType;
+
+typedef enum {
+    LANE_SAFE = 0,
+    LANE_HIGHWAY,
+    LANE_RIVER
+} LaneType;
 
 typedef struct {
-    int32_t x_pos;
-    int32_t y_pos;
-    int32_t width;
-    int32_t height;
+    int32_t x, y;
+    int32_t width, height;
     int32_t velocity;
-    uint8_t is_active;
-    uint8_t obj_variant; // 0: Car, 1: Ice Block, 2: Crocodile
+    uint8_t active;
+    uint8_t variant;
     
-    // Timsah detayları (Sola hareket ederken sol taraf ağızdır)
-    int32_t mouth_box_start;
-    int32_t mouth_box_end;
-    int32_t back_box_start;
-    int32_t back_box_end;
-    uint8_t mouth_is_open;
-} LaneObjectStruct;
+    int32_t mouth_start;
+    int32_t mouth_end;
+    int32_t back_start;
+    int32_t back_end;
+    uint8_t mouth_open;
+} GameObject;
 
 typedef struct {
-    uint8_t lane_index;
-    BiomeKind biome;
-    LaneKind kind;
+    uint8_t index;
+    BiomeType biome;
+    LaneType type;
     int32_t world_y;
     int32_t base_speed;
-    uint16_t spawn_counter;
-    uint16_t spawn_limit;
-    LaneObjectStruct objects[MAX_OBJS_PER_LANE];
-} WorldLaneStruct;
+    uint16_t timer;
+    uint16_t interval;
+    GameObject objects[MAX_OBJECTS];
+} LaneData;
 
 typedef struct {
-    int32_t x;
-    int32_t y;
-    int32_t w;
-    int32_t h;
+    int32_t x, y, w, h;
     uint8_t lives;
     uint32_t score;
-    uint8_t state_alive;
-    uint8_t state_drowned;
-    uint8_t state_crushed;
-    int32_t carried_momentum;
-} PlayerEntityStruct;
+    uint8_t alive;
+} FrogPlayer;
 
 typedef struct {
-    WorldLaneStruct lanes[TOTAL_MAP_LANES];
-    PlayerEntityStruct player;
-    uint32_t total_ticks;
-    uint32_t prng_state;
-    uint32_t camera_scroll_y;
-    BiomeKind active_biome_tracker;
-} SystemKernelContext;
-
-static SystemKernelContext kernel;
-
-static void Kernel_WaitVBlank(void) {
-    while ((HW_REG_VBLANK_STATUS & 0x0100) == 0) {
-        // Donanımsal VBlank senkronizasyon döngüsü (Sonsuz asılı kalmaz, register okur)
-    }
-}
-
-static uint32_t Kernel_Random(void) {
-    kernel.prng_state = (kernel.prng_state * 1664525UL + 1013904223UL);
-    return kernel.prng_state;
-}
-
-static BiomeKind Kernel_GetStrictNextBiome(BiomeKind current) {
-    uint32_t roll = Kernel_Random() % 100;
-    if (current == BIOME_KIND_TAIGA) {
-        return (roll < 70) ? BIOME_KIND_PLAINS : BIOME_KIND_TAIGA;
-    } else if (current == BIOME_KIND_RED_DESERT) {
-        return (roll < 70) ? BIOME_KIND_PLAINS : BIOME_KIND_RED_DESERT;
-    } else {
-        return (roll < 50) ? BIOME_KIND_TAIGA : BIOME_KIND_RED_DESERT;
-    }
-}
-
-static void Kernel_InitializeSystem(void) {
-    memset(&kernel, 0, sizeof(SystemKernelContext));
-    kernel.prng_state = 0x534E4B31; // 'SNK1'
-    kernel.active_biome_tracker = BIOME_KIND_PLAINS;
+    HardwareModel active_hardware;
+    GameModeState state;
+    LaneData lanes[TOTAL_LANES];
+    FrogPlayer player;
+    uint32_t ticks;
+    uint32_t seed;
+    int32_t camera_y;
+    BiomeType current_biome;
     
-    kernel.player.x = 160;
-    kernel.player.y = 192;
-    kernel.player.w = 16;
-    kernel.player.h = 16;
-    kernel.player.lives = 3;
-    kernel.player.score = 0;
-    kernel.player.state_alive = 1;
+    uint8_t menu_sel;
+    uint8_t pause_sel;
+    uint8_t gameover_sel;
+    uint8_t last_pad;
+    
+    // FPS ve İstatistik Sayacı
+    uint32_t fps_counter;
+    uint32_t current_fps;
+    uint32_t second_timer;
+} GameContext;
 
-    BiomeKind current_b = BIOME_KIND_PLAINS;
-    for (int i = 0; i < TOTAL_MAP_LANES; i++) {
-        if (i > 0 && (i % 6 == 0)) {
-            current_b = Kernel_GetStrictNextBiome(current_b);
-            kernel.active_biome_tracker = current_b;
+static GameContext ctx;
+
+// --- DİNAMİK CİHAZ TESPİTİ ---
+static HardwareModel DetectHardwareVersion(void) {
+    uint16_t hw_status = REG_SYSTEM_CTRL;
+    if ((hw_status & 0x0002) != 0 || (*(volatile uint8_t*)0xFF0002 == 'Z')) {
+        return HARDWARE_MODEL_CDZ;
+    }
+    return HARDWARE_MODEL_CD;
+}
+
+// --- VDP VRAM RENDER İŞLEMLERİ ---
+static void VDP_SetAddress(uint32_t addr, uint16_t mode_inc) {
+    REG_VRAM_MOD = mode_inc;
+    REG_VRAM_ADDR = (uint16_t)(addr & 0xFFFF);
+}
+
+static void VDP_WriteWord(uint16_t data) {
+    REG_VRAM_DATA = data;
+}
+
+static void VDP_DrawTextToFixLayer(int col, int row, const char *str) {
+    uint32_t vram_offset = 0x7000 + (row * 32 + col);
+    VDP_SetAddress(vram_offset, 1);
+    while (*str) {
+        VDP_WriteWord((uint16_t)(*str));
+        str++;
+    }
+}
+
+static void VDP_ClearScreenData(void) {
+    VDP_SetAddress(0x7000, 1);
+    for (int i = 0; i < 32 * 32; i++) {
+        VDP_WriteWord(0x0020);
+    }
+}
+
+static void CD_WaitVBlank(void) {
+    while ((REG_VBLANK_STATUS & 0x0100) == 0) {
+        // VDP Tarama Beklemesi
+    }
+}
+
+static uint32_t CD_Random(void) {
+    ctx.seed = (ctx.seed * 1664525UL + 1013904223UL);
+    return ctx.seed;
+}
+
+// Katı Biyom Geçiş Matrisi
+static BiomeType GetStrictNextBiome(BiomeType current) {
+    if (current == BIOME_TAIGA || current == BIOME_RED_DESERT) {
+        return BIOME_PLAINS;
+    }
+    return (ctx.seed % 2 == 0) ? BIOME_TAIGA : BIOME_RED_DESERT;
+}
+
+static void InitGameplay(void) {
+    ctx.active_hardware = DetectHardwareVersion();
+    ctx.seed = (ctx.active_hardware == HARDWARE_MODEL_CDZ) ? 0x43445A31 : 0x4344312D;
+    
+    ctx.camera_y = 0;
+    ctx.current_biome = BIOME_PLAINS;
+    
+    ctx.player.x = 160;
+    ctx.player.y = 192;
+    ctx.player.w = 16;
+    ctx.player.h = 16;
+    ctx.player.lives = 3;
+    ctx.player.score = 0;
+    ctx.player.alive = 1;
+
+    BiomeType b = BIOME_PLAINS;
+    for (int i = 0; i < TOTAL_LANES; i++) {
+        if (i > 0 && (i % 4 == 0)) {
+            b = GetStrictNextBiome(b);
+            ctx.current_biome = b;
         }
 
-        WorldLaneStruct *lane = &kernel.lanes[i];
-        lane->lane_index = (uint8_t)i;
-        lane->biome = current_b;
-        lane->world_y = i * LANE_PIXEL_HEIGHT;
+        LaneData *l = &ctx.lanes[i];
+        l->index = (uint8_t)i;
+        l->biome = b;
+        l->world_y = i * LANE_HEIGHT;
 
-        if (i == 0 || (i % 4 == 0)) {
-            lane->kind = LANE_KIND_SAFE_GROUND;
-            lane->base_speed = 0;
-            lane->spawn_limit = 0;
+        if (i == 0 || (i % 5 == 0)) {
+            l->type = LANE_SAFE;
+            l->base_speed = 0;
+            l->interval = 0;
         } else if (i % 2 == 1) {
-            lane->kind = LANE_KIND_HIGHWAY_TRAFFIC;
-            lane->base_speed = -((int32_t)(Kernel_Random() % 3) + 2); // Sola doğru otoban
-            lane->spawn_limit = 80;
+            l->type = LANE_HIGHWAY;
+            int32_t speed_mult = (ctx.active_hardware == HARDWARE_MODEL_CDZ) ? 4 : 3;
+            l->base_speed = -((int32_t)(CD_Random() % 3) + speed_mult);
+            l->interval = (ctx.active_hardware == HARDWARE_MODEL_CDZ) ? 55 : 75;
         } else {
-            lane->kind = LANE_KIND_RIVER_ICE_OR_CROCODILE;
-            lane->base_speed = -2; // Sola doğru nehir
-            lane->spawn_limit = 100;
+            l->type = LANE_RIVER;
+            l->base_speed = -2;
+            l->interval = 90;
         }
 
-        for (int j = 0; j < MAX_OBJS_PER_LANE; j++) {
-            LaneObjectStruct *obj = &lane->objects[j];
-            obj->x_pos = -999;
-            obj->y_pos = lane->world_y;
-            obj->width = 32;
-            obj->height = 14;
-            obj->velocity = lane->base_speed;
-            obj->is_active = 0;
+        for (int j = 0; j < MAX_OBJECTS; j++) {
+            GameObject *o = &l->objects[j];
+            o->active = 0;
+            o->x = -999;
+            o->y = l->world_y;
+            o->width = 32;
+            o->height = 14;
+            o->velocity = l->base_speed;
 
-            if (lane->kind == LANE_KIND_HIGHWAY_TRAFFIC) {
-                obj->obj_variant = 0; // Araba
-            } else if (lane->kind == LANE_KIND_RIVER_ICE_OR_CROCODILE) {
+            if (l->type == LANE_HIGHWAY) {
+                o->variant = (b == BIOME_RED_DESERT) ? 3 : 0;
+                o->width = 36;
+            } else if (l->type == LANE_RIVER) {
                 if (j % 2 == 0) {
-                    obj->obj_variant = 1; // Buz
+                    o->variant = 1; // Buz
                 } else {
-                    obj->obj_variant = 2; // Timsah
-                    obj->width = 48;
-                    obj->mouth_box_start = 0;
-                    obj->mouth_box_end = 12;
-                    obj->back_box_start = 13;
-                    obj->back_box_end = 48;
-                    obj->mouth_is_open = (uint8_t)(Kernel_Random() % 2);
+                    o->variant = 2; // Timsah
+                    o->width = 48;
+                    o->mouth_start = 0;
+                    o->mouth_end = 12;
+                    o->back_start = 13;
+                    o->back_end = 48;
+                    o->mouth_open = (uint8_t)(CD_Random() % 2);
                 }
             }
         }
     }
 }
 
-static void Kernel_SpawnLaneObject(WorldLaneStruct *lane) {
-    if (lane->kind == LANE_KIND_SAFE_GROUND) return;
-
-    for (int i = 0; i < MAX_OBJS_PER_LANE; i++) {
-        LaneObjectStruct *obj = &lane->objects[i];
-        if (!obj->is_active) {
-            obj->is_active = 1;
-            obj->x_pos = SCREEN_RES_X + 32; // Sağdan doğup sola gider
-            obj->velocity = lane->base_speed;
-            if (obj->obj_variant == 2) {
-                obj->mouth_is_open = (uint8_t)(Kernel_Random() % 2);
-            }
+static void SpawnLaneObj(LaneData *l) {
+    if (l->type == LANE_SAFE) return;
+    for (int i = 0; i < MAX_OBJECTS; i++) {
+        GameObject *o = &l->objects[i];
+        if (!o->active) {
+            o->active = 1;
+            o->x = SCREEN_WIDTH + 32;
+            o->velocity = l->base_speed;
+            if (o->variant == 2) o->mouth_open = (uint8_t)(CD_Random() % 2);
             break;
         }
     }
 }
 
-static void Kernel_UpdateLanesAndTraffic(void) {
-    for (int i = 0; i < TOTAL_MAP_LANES; i++) {
-        WorldLaneStruct *lane = &kernel.lanes[i];
-        if (lane->kind == LANE_KIND_SAFE_GROUND) continue;
+static void UpdateLanes(void) {
+    for (int i = 0; i < TOTAL_LANES; i++) {
+        LaneData *l = &ctx.lanes[i];
+        if (l->type == LANE_SAFE) continue;
 
-        lane->spawn_counter++;
-        if (lane->spawn_counter >= lane->spawn_limit) {
-            lane->spawn_counter = 0;
-            Kernel_SpawnLaneObject(lane);
+        l->timer++;
+        if (l->timer >= l->interval) {
+            l->timer = 0;
+            SpawnLaneObj(l);
         }
 
-        for (int j = 0; j < MAX_OBJS_PER_LANE; j++) {
-            LaneObjectStruct *obj = &lane->objects[j];
-            if (!obj->is_active) continue;
+        for (int j = 0; j < MAX_OBJECTS; j++) {
+            GameObject *o = &l->objects[j];
+            if (!o->active) continue;
 
-            obj->x_pos += obj->velocity;
-
-            if (obj->obj_variant == 2) {
-                if ((kernel.total_ticks % 45) == 0) {
-                    obj->mouth_is_open = !obj->mouth_is_open;
-                }
+            o->x += o->velocity;
+            if (o->variant == 2 && (ctx.ticks % 40) == 0) {
+                o->mouth_open = !o->mouth_open;
             }
+            if (o->x < -64) o->active = 0;
+        }
+    }
+}
 
-            if (obj->x_pos < -64) {
-                obj->is_active = 0;
+// --- OYUN İÇİ VE MENÜ KÖŞE HUD & VDP RENDERER ---
+static void VDP_RenderFrameToHardware(void) {
+    VDP_ClearScreenData();
+
+    // 1. OYUN İÇİNDE VE TÜM EKRANLARDA SABİT KÖŞE BİLGİ ALANI (HUD: FPS & Donanım)
+    VDP_DrawTextToFixLayer(1, 1, ctx.active_hardware == HARDWARE_MODEL_CDZ ? "HW: CDZ [2X]" : "HW: CD [1X]");
+    
+    char fps_buf[8];
+    int f_val = (int)ctx.current_fps;
+    fps_buf[0] = 'F'; fps_buf[1] = 'P'; fps_buf[2] = 'S'; fps_buf[3] = ':';
+    fps_buf[4] = '0' + (f_val / 10);
+    fps_buf[5] = '0' + (f_val % 10);
+    fps_buf[6] = '\0';
+    VDP_DrawTextToFixLayer(24, 1, fps_buf);
+
+    // Aktif Biyom Bilgisi Ekranın Üst Köşesinde Sürekli Görünür
+    int absolute_lane = (ctx.player.y + ctx.camera_y) / LANE_HEIGHT;
+    if (absolute_lane >= 0 && absolute_lane < TOTAL_LANES) {
+        ctx.current_biome = ctx.lanes[absolute_lane].biome;
+    }
+
+    if (ctx.current_biome == BIOME_TAIGA) {
+        VDP_DrawTextToFixLayer(1, 2, "BIOME: KARLI TAIGA");
+    } else if (ctx.current_biome == BIOME_RED_DESERT) {
+        VDP_DrawTextToFixLayer(1, 2, "BIOME: KIZIL COL");
+    } else {
+        VDP_DrawTextToFixLayer(1, 2, "BIOME: OVA TAMPON");
+    }
+
+    // 2. DURUM MAKİNESİNE GÖRE EKRAN ÇİZİMLERİ
+    if (ctx.state == STATE_MAIN_MENU) {
+        if (ctx.current_biome == BIOME_TAIGA) {
+            VDP_DrawTextToFixLayer(6, 6, "FROGGER: KARLI TAIGA");
+        } else if (ctx.current_biome == BIOME_RED_DESERT) {
+            VDP_DrawTextToFixLayer(6, 6, "FROGGER: KIZIL COL");
+        } else {
+            VDP_DrawTextToFixLayer(6, 6, "FROGGER: OVA MODU");
+        }
+
+        VDP_DrawTextToFixLayer(9, 11, ctx.menu_sel == 0 ? "> OYUNA BASLA" : "  OYUNA BASLA");
+        VDP_DrawTextToFixLayer(9, 13, ctx.menu_sel == 1 ? "> CIKIS" : "  CIKIS");
+    } 
+    else if (ctx.state == STATE_PAUSE_MENU) {
+        VDP_DrawTextToFixLayer(10, 8,  "--- DURAKLATILDI ---");
+        VDP_DrawTextToFixLayer(9, 11, ctx.pause_sel == 0 ? "> OYUNA DEVAM ET" : "  OYUNA DEVAM ET");
+        VDP_DrawTextToFixLayer(9, 13, ctx.pause_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
+    } 
+    else if (ctx.state == STATE_GAME_OVER) {
+        VDP_DrawTextToFixLayer(11, 8,  "GAME OVER");
+        VDP_DrawTextToFixLayer(9, 11, ctx.gameover_sel == 0 ? "> YENIDEN BASLA" : "  YENIDEN BASLA");
+        VDP_DrawTextToFixLayer(9, 13, ctx.gameover_sel == 1 ? "> ANA MENUYE DON" : "  ANA MENUYE DON");
+    }
+    else if (ctx.state == STATE_GAMEPLAY) {
+        // Oyun İçerisinde Can ve Skor HUD Bilgisi
+        char score_buf[16];
+        int s_val = (int)ctx.player.score;
+        score_buf[0] = 'S'; score_buf[1] = ':';
+        score_buf[2] = '0' + ((s_val / 1000) % 10);
+        score_buf[3] = '0' + ((s_val / 100) % 10);
+        score_buf[4] = '0' + ((s_val / 10) % 10);
+        score_buf[5] = '0' + (s_val % 10);
+        score_buf[6] = '\0';
+        VDP_DrawTextToFixLayer(1, 26, score_buf);
+
+        // VDP Sprite Tablosuna Aktarım
+        VDP_SetAddress(0x8000, 1);
+
+        int32_t frog_screen_y = ctx.player.y - ctx.camera_y;
+        VDP_WriteWord((uint16_t)((512 - (frog_screen_y & 0x1FF)) << 7));
+        VDP_WriteWord(0x0002);
+        VDP_WriteWord(0x1000);
+        VDP_WriteWord((uint16_t)(ctx.player.x & 0x1FF));
+
+        for (int i = 0; i < TOTAL_LANES; i++) {
+            LaneData *l = &ctx.lanes[i];
+            for (int j = 0; j < MAX_OBJECTS; j++) {
+                GameObject *o = &l->objects[j];
+                if (o->active) {
+                    int32_t obj_screen_y = o->y - ctx.camera_y;
+                    if (obj_screen_y >= -32 && obj_screen_y <= SCREEN_HEIGHT + 32) {
+                        VDP_WriteWord((uint16_t)((512 - (obj_screen_y & 0x1FF)) << 7));
+                        VDP_WriteWord(0x0002);
+                        VDP_WriteWord(o->variant == 2 ? 0x1200 : 0x1100);
+                        VDP_WriteWord((uint16_t)(o->x & 0x1FF));
+                    }
+                }
             }
         }
     }
 }
 
-static void Kernel_ProcessCollisions(void) {
-    int32_t absolute_player_y = kernel.player.y + kernel.camera_scroll_y;
-    int current_lane_idx = absolute_player_y / LANE_PIXEL_HEIGHT;
-    
-    if (current_lane_idx < 0 || current_lane_idx >= TOTAL_MAP_LANES) {
-        return;
-    }
+static void CheckCollisions(void) {
+    int32_t abs_y = ctx.player.y + ctx.camera_y;
+    int lane_idx = abs_y / LANE_HEIGHT;
+    if (lane_idx < 0 || lane_idx >= TOTAL_LANES) return;
 
-    WorldLaneStruct *lane = &kernel.lanes[current_lane_idx];
+    LaneData *l = &ctx.lanes[lane_idx];
 
-    if (lane->kind == LANE_KIND_HIGHWAY_TRAFFIC) {
-        for (int i = 0; i < MAX_OBJS_PER_LANE; i++) {
-            LaneObjectStruct *obj = &lane->objects[i];
-            if (!obj->is_active) continue;
-
-            int32_t p_l = kernel.player.x;
-            int32_t p_r = kernel.player.x + kernel.player.w;
-            int32_t o_l = obj->x_pos;
-            int32_t o_r = obj->x_pos + obj->width;
-
-            if (p_r > o_l && p_l < o_r) {
-                kernel.player.state_alive = 0;
-                kernel.player.state_crushed = 1;
+    if (l->type == LANE_HIGHWAY) {
+        for (int i = 0; i < MAX_OBJECTS; i++) {
+            GameObject *o = &l->objects[i];
+            if (!o->active) continue;
+            if (ctx.player.x + ctx.player.w > o->x && ctx.player.x < o->x + o->width) {
+                ctx.player.alive = 0;
+                ctx.gameover_sel = 0;
+                ctx.state = STATE_GAME_OVER;
                 return;
             }
         }
     } 
-    else if (lane->kind == LANE_KIND_RIVER_ICE_OR_CROCODILE) {
-        uint8_t standing_safe = 0;
-        int32_t platform_velocity = 0;
+    else if (l->type == LANE_RIVER) {
+        uint8_t safe = 0;
+        int32_t p_vel = 0;
 
-        for (int i = 0; i < MAX_OBJS_PER_LANE; i++) {
-            LaneObjectStruct *obj = &lane->objects[i];
-            if (!obj->is_active) continue;
-
-            int32_t p_l = kernel.player.x;
-            int32_t p_r = kernel.player.x + kernel.player.w;
-            int32_t o_l = obj->x_pos;
-            int32_t o_r = obj->x_pos + obj->width;
-
-            if (p_r > o_l && p_l < o_r) {
-                if (obj->obj_variant == 1) {
-                    // Buz parçası: Tamamen güvenli
-                    standing_safe = 1;
-                    platform_velocity = obj->velocity;
+        for (int i = 0; i < MAX_OBJECTS; i++) {
+            GameObject *o = &l->objects[i];
+            if (!o->active) continue;
+            if (ctx.player.x + ctx.player.w > o->x && ctx.player.x < o->x + o->width) {
+                if (o->variant == 1) {
+                    safe = 1;
+                    p_vel = o->velocity;
                     break;
-                } 
-                else if (obj->obj_variant == 2) {
-                    // Timsah: Ağız ve sırt ayrımı (Sol taraf ağızdır)
-                    int32_t local_px = p_l - obj->x_pos;
-
-                    if (local_px >= obj->mouth_box_start && local_px <= obj->mouth_box_end) {
-                        // Timsahın ağzına denk geldi -> ÖLÜM
-                        kernel.player.state_alive = 0;
-                        kernel.player.state_drowned = 1;
+                } else if (o->variant == 2) {
+                    int32_t local_x = ctx.player.x - o->x;
+                    if (local_x >= o->mouth_start && local_x <= o->mouth_end && o->mouth_open) {
+                        ctx.player.alive = 0;
+                        ctx.gameover_sel = 0;
+                        ctx.state = STATE_GAME_OVER;
                         return;
-                    } 
-                    else if (local_px >= obj->back_box_start && local_px <= obj->back_box_end) {
-                        // Timsahın sırtına denk geldi -> GÜVENLİ
-                        standing_safe = 1;
-                        platform_velocity = obj->velocity;
+                    } else if (local_x >= o->back_start && local_x <= o->back_end) {
+                        safe = 1;
+                        p_vel = o->velocity;
                         break;
                     }
                 }
             }
         }
 
-        if (!standing_safe) {
-            // Hiçbir nesnenin üstünde değil -> SUYA DÜŞTÜ
-            kernel.player.state_alive = 0;
-            kernel.player.state_drowned = 1;
+        if (!safe) {
+            ctx.player.alive = 0;
+            ctx.gameover_sel = 0;
+            ctx.state = STATE_GAME_OVER;
         } else {
-            // Nesne hızıyla sürüklenme momentumu
-            kernel.player.x += platform_velocity;
-            if (kernel.player.x < 0 || kernel.player.x > SCREEN_RES_X) {
-                kernel.player.state_alive = 0;
+            ctx.player.x += p_vel;
+            if (ctx.player.x < 0 || ctx.player.x > SCREEN_WIDTH) {
+                ctx.player.alive = 0;
+                ctx.gameover_sel = 0;
+                ctx.state = STATE_GAME_OVER;
             }
         }
     }
 }
 
-static void Kernel_HandleInputAndMovement(void) {
-    uint8_t pad = HW_REG_JOYPAD1;
+static void HandleControllerInput(void) {
+    uint8_t pad = REG_JOYPAD1;
+    uint8_t pressed = (ctx.last_pad ^ pad) & ~pad;
 
-    // Neo Geo Joypad Bitmask Kontrolleri (0 = Basıldı)
-    if (!(pad & 0x01)) { // Up
-        kernel.player.y -= 2;
-        if (kernel.player.y < 60) {
-            kernel.camera_scroll_y += 16;
-            kernel.player.y += 16;
-            kernel.player.score += 25;
+    if (ctx.state == STATE_MAIN_MENU) {
+        if (pressed & 0x01 && ctx.menu_sel > 0) ctx.menu_sel--;
+        if (pressed & 0x02 && ctx.menu_sel < 1) ctx.menu_sel++;
+        if ((pressed & 0x10) || (pressed & 0x20)) {
+            if (ctx.menu_sel == 0) {
+                InitGameplay();
+                ctx.state = STATE_GAMEPLAY;
+            }
+        }
+    } else if (ctx.state == STATE_GAMEPLAY) {
+        if (pressed & 0x20) {
+            ctx.pause_sel = 0;
+            ctx.state = STATE_PAUSE_MENU;
+            return;
+        }
+        if (!(pad & 0x01)) {
+            ctx.player.y -= 2;
+            if (ctx.player.y < 60) {
+                ctx.camera_y += 16;
+                ctx.player.y += 16;
+                ctx.player.score += 25;
+            }
+        }
+        if (!(pad & 0x02)) ctx.player.y += 2;
+        if (!(pad & 0x04)) ctx.player.x -= 2;
+        if (!(pad & 0x08)) ctx.player.x += 2;
+    } else if (ctx.state == STATE_PAUSE_MENU) {
+        if (pressed & 0x01 && ctx.pause_sel > 0) ctx.pause_sel--;
+        if (pressed & 0x02 && ctx.pause_sel < 1) ctx.pause_sel++;
+        if ((pressed & 0x10) || (pressed & 0x20)) {
+            if (ctx.pause_sel == 0) ctx.state = STATE_GAMEPLAY;
+            else ctx.state = STATE_MAIN_MENU;
+        }
+    } else if (ctx.state == STATE_GAME_OVER) {
+        if (pressed & 0x01 && ctx.gameover_sel > 0) ctx.gameover_sel--;
+        if (pressed & 0x02 && ctx.gameover_sel < 1) ctx.gameover_sel++;
+        if ((pressed & 0x10) || (pressed & 0x20)) {
+            if (ctx.gameover_sel == 0) {
+                InitGameplay();
+                ctx.state = STATE_GAMEPLAY;
+            } else {
+                ctx.state = STATE_MAIN_MENU;
+            }
         }
     }
-    if (!(pad & 0x02)) { // Down
-        kernel.player.y += 2;
-    }
-    if (!(pad & 0x04)) { // Left
-        kernel.player.x -= 2;
-    }
-    if (!(pad & 0x08)) { // Right
-        kernel.player.x += 2;
-    }
+    ctx.last_pad = pad;
 }
 
 int main(void) {
-    Kernel_InitializeSystem();
+    memset(&ctx, 0, sizeof(GameContext));
+    
+    ctx.active_hardware = DetectHardwareVersion();
+    ctx.state = STATE_MAIN_MENU;
+    ctx.seed = 0x47414D45;
+    ctx.last_pad = 0xFF;
+    ctx.current_biome = BIOME_PLAINS;
 
-    while (kernel.player.state_alive) {
-        Kernel_WaitVBlank();
-        
-        kernel.total_ticks++;
-        Kernel_HandleInputAndMovement();
-        Kernel_UpdateLanesAndTraffic();
-        Kernel_ProcessCollisions();
+    while (1) {
+        CD_WaitVBlank();
+        ctx.ticks++;
+
+        // Canlı FPS Sayaç Güncellemesi (Her 60 VBlank karesinde bir hesaplanır)
+        ctx.fps_counter++;
+        ctx.second_timer++;
+        if (ctx.second_timer >= 60) {
+            ctx.current_fps = ctx.fps_counter;
+            ctx.fps_counter = 0;
+            ctx.second_timer = 0;
+        }
+
+        HandleControllerInput();
+
+        if (ctx.state == STATE_GAMEPLAY) {
+            UpdateLanes();
+            CheckCollisions();
+        }
+
+        // Oyun içinde ve menülerde anlık HUD ve VDP güncellemesi
+        VDP_RenderFrameToHardware();
     }
-
-    return (int)kernel.player.score;
+    return 0;
 }
