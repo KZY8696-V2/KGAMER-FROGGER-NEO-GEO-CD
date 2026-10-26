@@ -23,12 +23,18 @@ jobs:
             git \
             wget \
             unzip \
-            genisoimage \
-            vasm
+            genisoimage
+
+      - name: Install VASM via Snap Store
+        run: |
+          # VASM Snap Store'da sadece beta kanalında yer almaktadır
+          sudo snap install vasm --beta
 
       - name: Assemble main.asm
         run: |
-          vasmm68k_mot -Fbin -nosym -o frogger.bin main.asm
+          # Snap sürümünde komut adı doğrudan 'vasm' şeklindedir.
+          # m68k işlemcisini ve Motorola sözdizimini parametre olarak belirtiyoruz.
+          vasm -m68k -mot -Fbin -nosym -o frogger.bin main.asm
 
       - name: Create Neo Geo CD ISO Image
         run: |
