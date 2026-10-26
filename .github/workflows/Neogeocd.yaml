@@ -17,13 +17,18 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential wget git genisoimage binutils-m68k-linux-gnu gcc-m68k-linux-gnu
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            git \
+            wget \
+            genisoimage \
+            binutils-m68k-linux-gnu \
+            gcc-m68k-linux-gnu
 
       - name: Setup Neodev SDK
         run: |
-          # Neodev SDK ve m68k toolchain entegrasyonu
-          git clone https://github.com/sevii/neodev.git || true
+          git clone --depth 1 https://github.com/sevii/neodev.git || true
           cd neodev && make && sudo make install || true
           cd ..
 
@@ -35,14 +40,11 @@ jobs:
       - name: Package Neo Geo CD ISO
         run: |
           mkdir -p cd_root
-          # Derlenen binary dosyasını CD kök dizinine kopyala (Neo Geo CD boot formatı)
           cp frogger.elf cd_root/BOOT.PRG
           
-          # IPL.TXT (Neo Geo CD Başlık ve Açılış Bilgisi) oluştur
           echo "FROGGER NEO GEO CD / CDZ" > cd_root/IPL.TXT
           echo "BOOT = /BOOT.PRG" >> cd_root/IPL.TXT
 
-          # ISO imajını oluştur
           genisoimage -V "FROGGER_CD" -d -r -o frogger.iso cd_root/
 
       - name: Upload ISO Artifact
