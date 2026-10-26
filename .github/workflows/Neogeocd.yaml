@@ -29,9 +29,17 @@ jobs:
 
       - name: Setup Neodev SDK
         run: |
-          git clone --depth 1 https://github.com/sevii/neodev.git || true
-          cd neodev && make && sudo make install || true
-          cd ..
+          # HTTPS yerine auth istememesi için token veya farklı bir yöntemle clone deneme, 
+          # eğer başarısız olursa ZIP olarak indirmeyi dene
+          git clone --depth 1 https://github.com/sevii/neodev.git || wget https://github.com/sevii/neodev/archive/refs/heads/main.zip -O neodev.zip && unzip neodev.zip && mv neodev-main neodev
+          
+          # Eğer neodev klasörü başarıyla geldiyse derle ve kur
+          if [ -d "neodev" ]; then
+            cd neodev && make && sudo make install
+            cd ..
+          else
+            echo "Warning: neodev SDK could not be downloaded automatically."
+          fi
 
       - name: Compile Project (Make)
         run: |
