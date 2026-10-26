@@ -1,4 +1,4 @@
-name: Build Neo Geo CD Frogger
+name: Neo Geo CD Frogger VASM Build
 
 on:
   push:
@@ -12,49 +12,41 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Build Tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             git \
             wget \
-            genisoimage \
-            binutils-m68k-linux-gnu \
-            gcc-m68k-linux-gnu \
-            libc6-dev-m68k-cross
+            unzip \
+            genisoimage
 
-      - name: Setup Neodev SDK
+      - name: Build VASM from Source
         run: |
-          # HTTPS yerine auth istememesi için token veya farklı bir yöntemle clone deneme, 
-          # eğer başarısız olursa ZIP olarak indirmeyi dene
-          git clone --depth 1 https://github.com/sevii/neodev.git || wget https://github.com/sevii/neodev/archive/refs/heads/main.zip -O neodev.zip && unzip neodev.zip && mv neodev-main neodev
+          git clone https://github.com/mamedev/vasm.git
+          cd vasm
+          make CPU=m68k SYNTAX=mot
+          sudo cp vasmm68k_mot /usr/local/bin/
+          cd ..
+          vasmm68k_mot -version
+
+      - name: Assemble main.asm
+        run: |
+          vasmm68k_mot -Fbin -nosym -o frogger.bin main.asm
+
+      - name: Create Neo Geo CD ISO Image
+        run: |
+          mkdir -p iso_root
+          cp frogger.bin iso_root/BOOT.PRG
           
-          # Eğer neodev klasörü başarıyla geldiyse derle ve kur
-          if [ -d "neodev" ]; then
-            cd neodev && make && sudo make install
-            cd ..
-          else
-            echo "Warning: neodev SDK could not be downloaded automatically."
-          fi
+          echo "FROGGER NEO GEO CD" > iso_root/IPL.TXT
+          echo "BOOT = /BOOT.PRG" >> iso_root/IPL.TXT
 
-      - name: Compile Project (Make)
-        run: |
-          make clean
-          make
-
-      - name: Package Neo Geo CD ISO
-        run: |
-          mkdir -p cd_root
-          cp frogger.elf cd_root/BOOT.PRG
-          
-          echo "FROGGER NEO GEO CD / CDZ" > cd_root/IPL.TXT
-          echo "BOOT = /BOOT.PRG" >> cd_root/IPL.TXT
-
-          genisoimage -V "FROGGER_CD" -d -r -o frogger.iso cd_root/
+          genisoimage -V "FROGGER_CD" -d -r -o frogger.iso iso_root/
 
       - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
