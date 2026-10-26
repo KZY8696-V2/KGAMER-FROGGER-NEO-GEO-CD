@@ -23,16 +23,8 @@ jobs:
             git \
             wget \
             unzip \
-            genisoimage
-
-      - name: Build VASM from Source
-        run: |
-          git clone https://github.com/mamedev/vasm.git
-          cd vasm
-          make CPU=m68k SYNTAX=mot
-          sudo cp vasmm68k_mot /usr/local/bin/
-          cd ..
-          vasmm68k_mot -version
+            genisoimage \
+            vasm
 
       - name: Assemble main.asm
         run: |
